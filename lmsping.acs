@@ -254,12 +254,10 @@ script "LMSPing_Client" (void) CLIENTSIDE
 	bool pingtrack = false;
 	bool getlastpos = false;
 	str plycoords = "";
-	int ID = Timer();
 
 	// Drawing loop
 	while (!PlayerIsSpectator(plynum) && ClassifyActor(TID_PLAYER+plynum) & ACTOR_ALIVE)
 	{
-		print(s:"Running ", d:ID);
 		str cooldownMsg = "";
 		int curtime = Timer();
 		int canping = false;
