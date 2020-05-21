@@ -1,0 +1,698 @@
+#library "lmsping"
+#include "zcommon.acs"
+
+
+/*===================================================================================================
+                                             Definitions
+===================================================================================================*/
+
+#define DUMMY ""
+#define VERSION "1.0"
+#define SECOND 35
+#define MAXPLAYERS 64
+
+// TID Macros
+#define TID_PLAYER 1000
+
+// Radar macros
+#define ANIMTIME 7 // Ticks to animate
+
+// Macros for Message ID's
+#define MSGID_CONSOLE  -1
+#define MSGID_COOLDOWN 1
+#define MSGID_RADAR    2
+
+
+/*===================================================================================================
+										  Global variables
+===================================================================================================*/
+
+int global_playercanping;
+int global_playercanping2; // Needed because an int is 32 bits and we have 64 players
+int global_playerpingcooldown[MAXPLAYERS];
+int global_playerpingkillsleft[MAXPLAYERS];
+
+
+/*===================================================================================================
+										   Server Scripts
+===================================================================================================*/
+
+// Initialize LMSPing
+script "LMSPing_Initialize" OPEN
+{
+	int i;
+
+	// If the player can ping on spawn
+	if (GetCVar("lmsping_pingonspawn"))
+	{
+		// Initialize the globals in a ready state
+		global_playercanping = 0xFFFFFFFF;
+		global_playercanping2 = 0xFFFFFFFF;
+		for (i=0; i<MAXPLAYERS; i++)
+		{
+			global_playerpingcooldown[i] = 0;
+			global_playerpingkillsleft[i] = 0;
+		}
+	}
+	else
+	{
+		// Initialize the globals with cooldown on everything
+		global_playercanping = 0;
+		global_playercanping2 = 0;
+		for (i=0; i<MAXPLAYERS; i++)
+		{
+			if (GetCVar("lmsping_cooldown") != 0)
+				global_playerpingcooldown[i] = Timer()+GetCVar("lmsping_cooldown")*SECOND;
+			if (GetCVar("lmsping_coolonfrags") != 0)
+				global_playerpingkillsleft[i] = 0;
+		}
+	}
+
+	// Start the main logic threads
+	ACS_NamedExecute("LMSPing_Logic", 0);
+	ACS_NamedExecute("LMSPing_NetworkGlobals", 0);
+}
+
+// Handle player death
+script "LMSPing_Kill" DEATH
+{
+	int before = ActivatorTID();
+	SetActivatorToTarget(0);
+
+	// Don't give kills for suiciding
+	if (before == ActivatorTID())
+		terminate;
+
+	// Decrease kills left
+	if (global_playerpingkillsleft[PlayerNumber()] > 0)
+		global_playerpingkillsleft[PlayerNumber()]--;
+}
+
+// Main logic script
+script "LMSPing_Logic" (void)
+{
+	// Loop through all players
+	for (int i=0; i<MAXPLAYERS; i++)
+	{
+		// Skip this player if he doesn't exist
+		if (!PlayerInGame(i) || PlayerIsSpectator(i))
+			continue;
+
+		// Get whether the player can ping
+		bool canping;
+		if (i < 32)
+			canping = ((global_playercanping >> i) & 0x01);
+		else
+			canping = ((global_playercanping2 >> (i-32)) & 0x01);
+
+		// If the player cannot ping
+		if (!canping)
+		{
+			// And the cooldowns are over
+			if (global_playerpingcooldown[i] < Timer() && global_playerpingkillsleft[i] == 0)
+			{
+				// Allow the player to ping again
+				if (i < 32)
+					global_playercanping |= (0x01<<i);
+				else
+					global_playercanping2 |= (0x01<<(i-32));
+				global_playerpingcooldown[i] = 0;
+				global_playerpingkillsleft[i] = GetCVar("lmsping_coolonfrags");
+			}
+		}
+	}
+
+	// Restart this script again
+	delay(1);
+	restart;
+}
+
+// Network global variables to players
+script "LMSPing_NetworkGlobals" (void)
+{
+	str killsleft = "";
+	SetGlobalCVar("__clientsync_playercanping", global_playercanping);
+	SetGlobalCVar("__clientsync_playercanping2", global_playercanping2);
+
+	// Get data from all players and pack it into a string
+	for (int i=0; i<MAXPLAYERS; i++)
+	{
+		if (!PlayerInGame(i) || PlayerIsSpectator(i))
+		{
+			killsleft = StrParam(s:killsleft, c:'\n');
+			continue;
+		}
+		killsleft = StrParam(s:killsleft, d:global_playerpingkillsleft[i], c:'\n');
+	}
+	SetGlobalCVarString("__clientsync_playerkillsleft", killsleft);
+
+	delay(1);
+	restart;
+}
+
+
+/*===================================================================================================
+										   Client Scripts
+===================================================================================================*/
+
+// Initialize the player on spawn
+script "LMSPing_PlayerSpawn" ENTER
+{
+	Thing_ChangeTID(0, TID_PLAYER + PlayerNumber());
+
+	// If the player can ping on spawn
+	if (GetCVar("lmsping_pingonspawn"))
+	{
+		// Initialize the globals in a ready state
+		if (PlayerNumber() < 32)
+			global_playercanping |= (0x01<<PlayerNumber());
+		else
+			global_playercanping2 |= (0x01<<(PlayerNumber()-32));
+		global_playerpingcooldown[PlayerNumber()] = 0;
+		global_playerpingkillsleft[PlayerNumber()] = 0;
+	}
+	else
+	{
+		// Initialize the globals with cooldown on everything
+		if (PlayerNumber() < 32)
+			global_playercanping &= ~(0x01 << PlayerNumber());
+		else
+			global_playercanping2 &= ~(0x01 << (PlayerNumber()-32));
+		if (GetCVar("lmsping_cooldown") != 0)
+			global_playerpingcooldown[PlayerNumber()] = Timer()+GetCVar("lmsping_cooldown")*SECOND;
+		if (GetCVar("lmsping_coolonfrags") != 0)
+			global_playerpingkillsleft[PlayerNumber()] = 0;
+	}
+
+	ACS_NamedExecuteAlways("LMSPing_Client", 0);
+}
+
+// Handle player death
+script "LMSPing_PlayerDeath" DEATH
+{
+	Thing_ChangeTID(0, 0);
+}
+
+// Handle player respawn
+script "LMSPing_PlayerRespawn" RESPAWN
+{
+	Thing_ChangeTID(0, TID_PLAYER + PlayerNumber());
+	ACS_NamedExecuteAlways("LMSPing_Client", 0);
+}
+
+// Advertise the wad when joining a server
+Script "LMSPing_Advertise" OPEN CLIENTSIDE
+{
+    if (GetUserCVar(ConsolePlayerNumber(), "_lmsping_advertise"))
+    {
+        SetUserCVar(ConsolePlayerNumber(), "_lmsping_advertise", false);
+        HudMessage(s:StrParam(s:"  This server is using LMSPing\n",
+            s:"           Version ", s:VERSION,
+            s:"\n    Created by \cqB\csu\cdu\cq3\cs4\cd2\c- for MDF")
+        ; HUDMSG_LOG, MSGID_CONSOLE, CR_BLACK, -1.0, -1.0, 0.0, 0.0);
+    }
+}
+
+// Handle clientside pinging
+Script "LMSPing_Ping" (void) NET
+{
+	int canping = false;
+	if (PlayerNumber() < 32)
+		canping = ((global_playercanping >> PlayerNumber()) & 0x01);
+	else
+		canping =((global_playercanping2 >> (PlayerNumber()-32)) & 0x01);
+
+	// If the player can ping
+	if (canping == 1)
+	{
+		// Reset their time cooldown
+		if (GetCVar("lmsping_cooldown") != 0)
+			global_playerpingcooldown[PlayerNumber()] = Timer() + GetCVar("lmsping_cooldown")*SECOND;
+
+		// Reset their kill cooldown
+		if (GetCVar("lmsping_coolonfrags") != 0)
+			global_playerpingkillsleft[PlayerNumber()] = GetCVar("lmsping_coolonfrags");
+
+		// Disable pinging
+		if (PlayerNumber() < 32)
+			global_playercanping &= ~(0x01 << PlayerNumber());
+		else
+			global_playercanping2 &= ~(0x01 << (PlayerNumber()-32));
+	}
+}
+
+// Clientside HUD main logic
+script "LMSPing_Client" (void) CLIENTSIDE
+{
+	int i;
+	int plynum = ConsolePlayerNumber();
+	int nextping = Timer()+GetCVar("lmsping_cooldown")*SECOND;
+	int pingtime = 0;
+	int pinganimtime = 0;
+	int pingalpha = 0.0;
+	int lastPingValue = -1;
+	bool pingtrack = false;
+	bool getlastpos = false;
+	str plycoords = "";
+	int ID = Timer();
+
+	// Drawing loop
+	while (!PlayerIsSpectator(plynum) && ClassifyActor(TID_PLAYER+plynum) & ACTOR_ALIVE)
+	{
+		print(s:"Running ", d:ID);
+		str cooldownMsg = "";
+		int curtime = Timer();
+		int canping = false;
+		int killsleft = Unpack_CVar_Array("__clientsync_playerkillsleft");
+
+		// Get whether the client can ping
+		if (ConsolePlayerNumber() < 32)
+			canping = (GetCVar("__clientsync_playercanping") >> ConsolePlayerNumber()) & 0x01;
+		else
+			canping = (GetCVar("__clientsync_playercanping2") >> (ConsolePlayerNumber()-32)) & 0x01;
+
+		// Initialize the last ping value
+		if (lastPingValue == -1)
+			lastPingValue = canping;
+
+		// Notify that we can ping again
+		if (!lastPingValue && canping)
+		{
+			if (GetUserCVar(ConsolePlayerNumber(), "cl_lmsping_usesounds"))
+				LocalAmbientSound("LMSPing/PingReady", 127);
+		}
+
+		// If we pinged
+		if (!canping && lastPingValue)
+		{
+			// Play a sound
+			if (GetUserCVar(ConsolePlayerNumber(), "cl_lmsping_usesounds"))
+				LocalAmbientSound("LMSPing/PingUse", 127);
+
+			// Decide on the duration
+			if (GetCVar("lmsping_duration") != 0)
+			{
+				pingtime = curtime+GetCVar("lmsping_duration")*SECOND;
+				pingtrack = true;
+			}
+			else
+			{
+				pingtime = curtime+SECOND;
+				pingtrack = false;
+			}
+
+			// Set a bunch of other values regarding animations/logic
+			getlastpos = true;
+			pingalpha = 1.0;
+			pinganimtime = Timer()+ANIMTIME;
+			nextping = Timer()+GetCVar("lmsping_cooldown")*SECOND;
+		}
+
+		// Track the players
+		if (pingtime > curtime && pingtrack)
+			getlastpos = true;
+
+		// Stop tracking when time runs out
+		if (pingtime < curtime && pingalpha > 0.0)
+		{
+			if (pingalpha > 0.0)
+				pingalpha -= 0.1;
+			pingtrack = false;
+			getlastpos = false;
+		}
+
+		// Store player positions in a string (Needed for when tracking stops)
+		if (getlastpos)
+		{
+			getlastpos = false;
+			plycoords = "";
+
+			// Get all player coordinates
+			for (i=0; i<MAXPLAYERS; i++)
+			{
+				if (PlayerInGame(i))
+					plycoords = StrParam(s:plycoords, d:GetActorX(TID_PLAYER+i), c:' ', d:GetActorY(TID_PLAYER+i), c:' ', d:GetActorZ(TID_PLAYER+i), c:'\n');
+				else
+					plycoords = StrParam(s:plycoords, c:'\n');
+			}
+		}
+
+		// Draw the pings
+		if (pingalpha > 0.0)
+			HUD_ShowPings(pingtrack, pinganimtime, pingalpha, plycoords);
+
+		// Draw the cooldown
+		if (GetUserCVar(ConsolePlayerNumber(), "cl_lmsping_showcooldown"))
+		{
+			str checkBound = StrParam(k:"+posradar");
+			SetHudSize(320, 240, 0);
+			SetFont("SMALLFONT");
+
+			// If the player can't ping, draw the cooldown, otherwise show the radar's ready
+			if (!canping)
+			{
+				int time = nextping-Timer();
+				int seconds = time/SECOND;
+				int miliseconds = FixedMul(FixedDiv((time%SECOND)<<16, SECOND<<16), 100.0)>>16;
+				str timestr = "";
+
+				// Create the time string
+				if (time > 0)
+				{
+					if (seconds < 10)
+						timestr = "0";
+					timestr = StrParam(s:timestr, d:seconds, s:":");
+					if (miliseconds < 10)
+						timestr = StrParam(s:timestr, s:"0");
+					timestr = StrParam(s:timestr, d:miliseconds);
+				}
+				else
+					timestr = "00:00";
+
+				if (GetCVar("lmsping_cooldown") != 0)
+					cooldownMsg = StrParam(s:"Cooldown: ", s:timestr);
+				if (GetCVar("lmsping_coolonfrags") != 0)
+				{
+					if (GetCVar("lmsping_cooldown") != 0)
+						cooldownMsg = StrParam(s:cooldownMsg, c:'\n');
+					cooldownMsg = StrParam(s:cooldownMsg, s:"Kills left: ", d:killsleft);
+				}
+			}
+			else
+				cooldownMsg = StrParam(s:"Radar is ready, press '", k:"+posradar", s:"' to use.");
+
+			// Complain if the radar key isn't bound
+			if (GetChar(checkBound, 0) == '?' && GetChar(checkBound, 1) == '?')
+				cooldownMsg = "Radar key not bound! Bind it in\nOptions->Customize Controls";
+
+			// Print the cooldown
+			HudMessage(s:cooldownMsg; HUDMSG_PLAIN, MSGID_COOLDOWN, CR_GREEN, 160.4, 0.1, 1.0);
+		}
+
+		// Wait a little and do the loop again
+		lastPingValue = canping;
+		delay(1);
+	}
+
+	// Clean up the HUDMessages
+	HudMessage(s:""; HUDMSG_PLAIN, MSGID_COOLDOWN, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+	for (i=0; i<MAXPLAYERS; i++)
+	{
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+0+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+1+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+2+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+3+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+	}
+}
+
+
+/*===================================================================================================
+										      Functions
+===================================================================================================*/
+
+/*-------------------------------------------------------------
+                         SetGlobalCVar
+
+Sets a CVar if it is not already set
+Argument 1 - A string with the cvar to set
+Argument 2 - The number value to set the cvar to
+-------------------------------------------------------------*/
+function void SetGlobalCVar(str cvar, int value)
+{
+    if (GetCVar(cvar) != value)
+        SetCVar(cvar, value);
+}
+
+/*-------------------------------------------------------------
+					  SetGlobalCVarString
+
+Sets a String CVar if it is not already set
+Argument 1 - A string with the cvar to set
+Argument 2 - The string to set the cvar to
+-------------------------------------------------------------*/
+function void SetGlobalCVarString(str cvar, str value)
+{
+    if (StrCmp(GetCVarString(cvar), value) != 0)
+        SetCVarString(cvar, value);
+}
+
+/*-------------------------------------------------------------
+					     HUD_ShowPings
+
+Draws the pings on the screen
+Argument 1 - Whether the ping should follow players or not
+Argument 2 - The animation time of the ping
+Argument 3 - The ping alpha
+Argument 4 - A string with all the last player coordinates on it
+-------------------------------------------------------------*/
+function void HUD_ShowPings(bool pingtrack, int pinganimtime, int pingalpha, str plycoords)
+{
+	int hudX = 320;
+	int hudY = 240;
+	int xOffset = 0;
+	int yOffset = 0;
+	int animspread = FixedMul(300.0, FixedDiv(clamp(pinganimtime-Timer(), 0, ANIMTIME)<<16, ANIMTIME<<16))>>16;
+	int strleng = StrLen(plycoords);
+	int curchar = 0;
+	int lastspace = 0;
+
+	// For all the players
+	for (int i=0; i<MAXPLAYERS; i++)
+	{
+		int dist, angle, vang, pitch, x, y, z;
+		int tid = TID_PLAYER + i;
+		int xScale;
+		int yScale;
+		int datanum = 0;
+		int color = CR_GREEN;
+
+		// Clean up the HUDMessages
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+0+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+1+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+2+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+		HudMessage(s:""; HUDMSG_PLAIN, MSGID_RADAR+3+i*4, CR_UNTRANSLATED, 0.0, 0.0, 1.0);
+
+		// Don't show the ping for dead players or myself
+		if (i == ConsolePlayerNumber() || !PlayerInGame(i) || PlayerIsSpectator(i) || !(ClassifyActor(tid) & ACTOR_ALIVE))
+		{
+			for (; curchar<strleng; curchar++)
+			{
+				if (GetChar(plycoords, curchar) == '\n')
+				{
+					lastspace = ++curchar;
+					break;
+				}
+			}
+			continue;
+		}
+
+		// Extract the last known player positions from the string
+		for (; curchar<strleng; curchar++)
+		{
+			if (GetChar(plycoords, curchar) == ' ' || (GetChar(plycoords, curchar) == '\n' && datanum == 2))
+			{
+				str extracted = StrMid(plycoords, lastspace, curchar-lastspace);
+				switch (datanum)
+				{
+					case 0:
+						x = AToI(extracted);
+						break;
+					case 1:
+						y = AToI(extracted);
+						break;
+					case 2:
+						z = AToI(extracted);
+						break;
+				}
+				datanum++;
+				curchar++;
+				lastspace = curchar;
+				if (GetChar(plycoords, curchar-1) == '\n')
+					break;
+			}
+		}
+
+		// Change the color depending on the player's team
+		if (GetPlayerInfo(i, PLAYERINFO_TEAM) == TEAM_BLUE)
+			color = CR_BLUE;
+		else if (GetPlayerInfo(i, PLAYERINFO_TEAM) == TEAM_RED)
+			color = CR_RED;
+
+		// Get the final x/y value by subtracting the client's x/y position
+		x = x - GetActorX(0);
+		y = y - GetActorY(0);
+
+		// If we want to track players, then get their current coordinates
+		if (pingtrack)
+		{
+			x = GetActorX(tid) - GetActorX(0);
+			y = GetActorY(tid) - GetActorY(0);
+			z = GetActorZ(tid);
+		}
+
+		// Get the player's angle and distance
+		vang = VectorAngle(x,y);
+		angle = (vang - GetActorAngle(0) + 1.0) % 1.0;
+		if(((vang+0.125)%0.5) > 0.25) dist = FixedDiv(y, sin(vang));
+		else dist = FixedDiv(x, cos(vang));
+
+		// Scale the cursor based on the distace
+		xScale = FixedMul(hudX<<16, FixedDiv(dist, 128.0))>>16;
+		yScale = FixedMul(hudY<<16, FixedDiv(dist, 128.0))>>16;
+		SetHudSize(xScale, yScale, 0);
+
+		// If the player is inside our horizontal view
+		if ((angle < 0.23 || angle > 0.85))
+		{
+			// And our vertical view
+			if (GetActorPitch(0) >= -0.5 && GetActorPitch(0) <= 0.5)
+			{
+				// Get the player angles
+				pitch = VectorAngle(dist, z - (GetActorZ(0) + GetActorViewHeight(0)));
+				pitch += FixedMul(GetActorPitch(0), 1.2) % 1.0;
+
+				// If the player is in our view (taking into account angles)
+				if ((xScale/2) * sin(angle) != 0 && cos(angle) != 0 && (xScale/2) * sin(pitch) != 0 && cos(pitch) != 0)
+				{
+					// Finalize the x and y positions
+					x = xScale/2 - ((xScale/2) * sin(angle) / cos(angle));
+					y = yScale/2 - ((xScale/2) * sin(pitch) / cos(pitch));
+					x+=xOffset;
+					y+=yOffset;
+
+					// Draw all 4 of the cursors
+					for (int j=0; j<4; j++)
+					{
+						int xSprOff = 0;
+						int ySprOff = 0;
+
+						// Change the x/y position based on the animation time
+						switch(j)
+						{
+							case 0:
+								xSprOff = -16-animspread;
+								ySprOff = -72-animspread;
+								break;
+							case 1:
+								xSprOff = 16+animspread;
+								ySprOff = -72-animspread;
+								break;
+							case 2:
+								xSprOff = 16+animspread;
+								ySprOff = 24+animspread;
+								break;
+							case 3:
+								xSprOff = -16-animspread;
+								ySprOff = 24+animspread;
+								break;
+						}
+
+						// Draw the radar pings
+						SetFont("LMSPFONT");
+						HudMessage(c:' '+(j+1); HUDMSG_ALPHA, MSGID_RADAR+j+i*4, color, ((x+xSprOff) << 16), ((y+ySprOff) << 16), 1.0, pingalpha);
+					}
+				}
+			}
+		}
+	}
+}
+
+/*-------------------------------------------------------------
+					         clamp
+
+Clamps a number between min/max
+Argument 1 - The value to clamp
+Argument 2 - The minimum value
+Argument 3 - The maximum value
+Returns - The clamped integer
+-------------------------------------------------------------*/
+function int clamp(int x, int min, int max)
+{
+	if (x > max)
+		return max;
+	if (x < min)
+		return min;
+	return x;
+}
+
+/*-------------------------------------------------------------
+					   Unpack_CVar_Array
+
+Unpacks a CVar array (in string format) and returns data
+relating solely to the client that called it.
+Argument 1 - A string with the CVarString's name
+Returns - The integer related to our client
+-------------------------------------------------------------*/
+function int Unpack_CVar_Array(str cvar)
+{
+    str data = GetCVarString(cvar);
+    int datalen = StrLen(data);
+
+    int start = 0;
+    int linecount = 0;
+
+	// Look through all the lines of the string
+    for (int i=0; i<datalen; i++)
+    {
+		// If we found a new line, we're looking at a new player
+        if (GetChar(data, i) == '\n')
+        {
+			// If we found the client, break the loop
+            if (linecount == ConsolePlayerNumber())
+            {
+                data = StrMid(data, start, i-start);
+                break;
+            }
+            else // Otherwise keep reading the string
+            {
+                start = i+1;
+                linecount++;
+            }
+
+        }
+    }
+
+	// Return the string data as an int via AToI
+    return AToI(data);
+}
+
+/*-------------------------------------------------------------
+							 AToI
+Converts a string to an integer
+Argument 1 - The string to convert to an integer
+Returns - An integer with the converted value
+-------------------------------------------------------------*/
+function int AToI(str s)
+{
+    bool negative = false;
+    int n = 0;
+    int len = StrLen(s);
+
+    // Go through every character in the string
+    for (int i = 0; i < len; i++)
+    {
+        int char = GetChar(s, i);
+
+        // Check if we found a negative sign
+        if (i == 0 && char == '-')
+        {
+            negative = true;
+            continue;
+        }
+
+        // Check that we are actually converting a number
+        if (char < '0' || char > '9')
+        {
+            print(s:"ERROR, attempting to convert ", c:char, s:" to number!");
+            continue;
+        }
+
+        // Add the number to our total
+        n = n*10 + (char-'0');
+    }
+
+    if (negative)
+        n = -n;
+
+    return n;
+}
