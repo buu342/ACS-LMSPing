@@ -1,6 +1,6 @@
 # LMSPing
 A player position tracker for Zandronum, created to prevent camping in LMS games. It allows players to, after a cooldown, press a button to reveal/track other players' positions. Works on other gamemodes as well. In Team games, pings show team colors as well.<br/><br/>
-Pinging relies on serverside values, and I don't reveal any information to clients which they don't already know about, so it should be all safe to use.<br/><br/>
+Pinging relies on serverside values, and I don't reveal any information to clients which they don't already know about, so it should be safe to use.<br/><br/>
 This WAD requested by Marcaek.
 <br/><br/>
 ### Serverside configuration
